@@ -1,0 +1,14 @@
+.head h3{
+    color: dodgerblue;
+
+}
+.grid1{
+    display: grid;
+    grid-template-columns: auto auto  auto auto;
+    grid-gap: 10px;
+    
+}
+.grid1 img{
+    width: 300px;
+    height: 150px;
+}
