@@ -1,0 +1,40 @@
+.form{
+    background-color: #80edc0;
+}
+.form h1{
+    text-align: center;
+    cursor: pointer;
+    
+}
+form{
+    margin: 30px auto;
+    background-color:bisque;
+    width: 350px;
+    padding: 60px;
+    border: 1px solid black;
+    border-radius: 20px;
+    
+}
+form input{
+    width: 60%;
+    padding: 10px;
+}
+footer{
+    background-color: teal;
+    color: black;
+    height: 50px;
+    text-align: center;
+    padding: 5px;
+    
+}
+.book span{
+    float: right;
+
+}
+.book h2{
+    cursor: pointer;
+}
+#button{
+    background-color: green;
+    cursor: pointer;
+}
