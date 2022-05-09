@@ -1,0 +1,76 @@
+
+.ab p{
+    font-size: 25px;
+}
+.ab h1{
+    font-size: 40px;
+    cursor: pointer;
+}
+.jv img{
+    height: 250px;
+    width: 400px;
+    border-radius: 100%;
+    margin-top: 120px;
+    float: right;
+    
+}
+.home{
+    display: grid;
+    grid-template-columns: 70% 30%;
+    background-color:mediumseagreen;
+    
+}
+.btn{
+    margin-inline-start: 300px;
+    padding: 10px;
+    
+}
+.btn h2{
+    color:black;
+}
+button{
+    background-color: darkblue;
+    color: white;
+    padding: 8px;
+    cursor: pointer;
+}
+.Home1{
+    display: grid;
+    grid-template-columns: 50% 50%;
+    background-color: #ddd;
+    height: 475px;
+    grid-gap: 10px;
+    
+    
+}
+.sec1{
+    width: 600px;
+    background-color: white;
+    height: 400px;
+    margin: 10px;
+    padding: 20px;
+    
+
+}
+.sec1 h2{
+    color: dodgerblue;
+    cursor: pointer;
+}
+.sec1 p{
+    font-size: 18px;
+}
+.images{
+    width: 600px;
+    background-color: white;
+    height: 400px;
+    margin: 10px;
+    padding: 20px;
+}
+.images h2{
+    color: dodgerblue;
+    cursor: pointer;
+}
+.images img{
+    height: 120px;
+    width: 200px;
+}
