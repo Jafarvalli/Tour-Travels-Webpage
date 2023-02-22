@@ -1,0 +1,914 @@
+using DSG.Action.Query.BusinessLogic;
+using DSG.Action.Query.Logic;
+using DSG.Action.QueryService;
+using DSG.Enumerations;
+using DSG.Transport.Action.Query;
+using static Microsoft.EntityFrameworkCore.DbLoggerCategory;
+using System.Reflection;
+using System.ServiceModel.Channels;
+using System;
+using Microsoft.Extensions.Hosting;
+using Newtonsoft.Json;
+using System.Data;
+using Newtonsoft.Json.Linq;
+using DSG.Action.Query.Model;
+using Swashbuckle.AspNetCore.Annotations;
+using Microsoft.OpenApi.Models;
+using System.Text.Json.Serialization;
+using Microsoft.AspNetCore.Mvc;
+using DSG.Action.Query.Logic.BusinessLogic;
+using DSG.ServiceQueryApi;
+using Microsoft.AspNetCore.Builder;
+using DSG.ServiceQueryApi.Models;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.IdentityModel.Tokens;
+using System.Text;
+using System.Security.Policy;
+
+
+var builder = WebApplication.CreateBuilder(args);
+
+//Global Parameters.
+string _appConnectionString = builder.Configuration.GetConnectionString("QueryAPIConnection");
+string _probuildConnectionString = builder.Configuration.GetConnectionString("ProbuildConnection");
+BLLProbuild bLLProbuild = new BLLProbuild(_probuildConnectionString);
+string connectStr = string.Empty;
+
+//SSO For Query Sevice API (Single Sign On)
+string ValidURL = builder.Configuration.GetSection("QueryServiceAPI")["ValidURL"].ToString();
+
+//For HttpClient
+HttpClient client=new HttpClient();
+
+//For writing Logs in API.
+logs LogData = new logs();
+
+// Add services to the container.
+// Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
+builder.Services.AddEndpointsApiExplorer();
+
+builder.Services.AddControllers().AddJsonOptions(options =>
+{
+    options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter());
+});
+
+//It will gives information about our Minimal API.(OpenAPI Specification)
+var contact = new OpenApiContact()
+{
+    Name = "Dsg ContactInfo",
+    Email = "info@dsg-us.com",
+    Url = new Uri("http://dsg-us.com/contact-dsg.html")
+};
+
+var license = new OpenApiLicense()
+{
+    Name = "DSG SSO Service",
+    Url = new Uri("http://dev2015.dsg-us.com/ECLDEV_10.00.00/Services/SSO/UserService.svc")
+};
+
+var info = new OpenApiInfo()
+{
+    Version = "v1",
+    Title = "QueryService API",
+    Description = "QueryService provides a Minimal API for accessing data from central probuild service having different functions like"+
+    " CreateQuery,CreateQueryBatch,QueryClose,Queryreviewed,QueryReviewedDeleted,QueryReopen,QueryResponse,QueryStatus ListofQueries and AllQueryData."+
+    " No one can access this QueryService API data so,if anyone want to access the data from QueryService API we need valid credentials from DSG SSO Service,then only we can access the Data from this API."+
+    " For that we need to provide valid username and password from Basic Auth then execute one method from this API i.e;Authorization.",
+    TermsOfService = new Uri("http://dsg-us.com/services.html"),
+    Contact = contact,
+    License = license
+};
+
+builder.Services.AddSwaggerGen(option =>
+{
+    option.EnableAnnotations();
+    option.SwaggerDoc("v1",info);
+
+    option.OrderActionsBy((apiDesc) => $"{apiDesc.ActionDescriptor.RouteValues}");
+
+    //For Basic Auth Interface
+    option.AddSecurityDefinition("basic", new OpenApiSecurityScheme
+    {
+        Name = "Authorization",
+        Type = SecuritySchemeType.Http,
+        Scheme = "basic",
+        In = ParameterLocation.Header,
+        Description = "Basic Authorization header using the Bearer scheme."
+    });
+    option.AddSecurityRequirement(new OpenApiSecurityRequirement
+                {
+                    {
+                          new OpenApiSecurityScheme
+                            {
+                                Reference = new OpenApiReference
+                                {
+                                    Type = ReferenceType.SecurityScheme,
+                                    Id = "basic"
+                                }
+                            },
+                            new string[] {}
+                    }
+                });
+    //For Bearer Token Interface
+    option.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
+    {
+        Description = "Token must be Provided after Login the Query Service API.",
+        Name = "Authorization",
+        In = ParameterLocation.Header,
+        Type = SecuritySchemeType.Http,
+        BearerFormat = "JWT",
+        Scheme = "Bearer"
+    });
+    option.AddSecurityRequirement(new OpenApiSecurityRequirement
+    {
+        {
+            new OpenApiSecurityScheme
+            {
+                Reference=new OpenApiReference
+                {
+                    Type=ReferenceType.SecurityScheme,
+                    Id="Bearer"
+                }
+            },
+            new string[]{}
+        }
+    });
+});
+
+//Implementation of JWT Bearer Authentication on QueryServiceAPI
+builder.Services.AddAuthorization();
+builder.Services.AddAuthentication(opt =>
+{
+    opt.DefaultScheme = JwtBearerDefaults.AuthenticationScheme;
+    opt.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
+}).AddJwtBearer(opt =>
+{
+    opt.TokenValidationParameters = new TokenValidationParameters
+    {
+        ValidateIssuer = true,
+        ValidateAudience = true,
+        ValidateLifetime = true,
+        ValidateIssuerSigningKey = true,
+        ValidIssuer = builder.Configuration["JWT:ValidIssuer"],
+        ValidAudience = builder.Configuration["JWT:ValidAudiance"],
+        IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(builder.Configuration["JWT:SigningKey"]))
+    };
+});
+
+var app = builder.Build();
+
+// Configure the HTTP request pipeline.
+app.UseSwagger();
+app.UseSwaggerUI(c =>
+{
+    string swaggerJsonBasepath = string.IsNullOrWhiteSpace(c.RoutePrefix) ? "." : "..";
+    c.SwaggerEndpoint($"{swaggerJsonBasepath}/swagger/v1/swagger.json", "QueryService API V1");
+    c.DocumentTitle = "QueryServiceAPI";
+    c.DocExpansion(Swashbuckle.AspNetCore.SwaggerUI.DocExpansion.None);
+    //c.EnableDeepLinking();
+
+});
+
+app.UseAuthentication();
+app.UseAuthorization();
+
+//For Authentication Http Post Request.
+app.MapPost("/QueryServiceAPI/Login", [AllowAnonymous] async (HttpRequest request) =>
+{
+    AuthenticationHelper authenticationHelper = new AuthenticationHelper(builder.Configuration);
+    string token = string.Empty;
+   
+    string authHeader = request.Headers["Authorization"];
+    if(authHeader != null && authHeader.StartsWith("Basic"))
+    {
+        string encodedUsernamePassword = authHeader.Substring("Basic ".Length).Trim();
+        Encoding encoding = Encoding.GetEncoding("iso-8859-1");
+        string usernamePassword = encoding.GetString(Convert.FromBase64String(encodedUsernamePassword));
+        int separatorIndex = usernamePassword.IndexOf(':');
+        string username = usernamePassword.Substring(0, separatorIndex); 
+        string password = usernamePassword.Substring(separatorIndex + 1);
+        var checkLogin = new UserDetails()
+        {
+            UserName = username,
+            UserPassKey = password,
+        };
+        var content = new StringContent(JsonConvert.SerializeObject(checkLogin), System.Text.Encoding.UTF8, "application/json");
+        var BaseUrl = await client.PostAsync(ValidURL, content);
+        string response = await BaseUrl.Content.ReadAsStringAsync();
+        bool isValid = JsonConvert.DeserializeObject<bool>(response);
+        if (isValid)
+        {
+            token = authenticationHelper.Login();
+            LogData.LogsData(token);
+
+        }
+    }
+    if (!string.IsNullOrEmpty(token))
+    {
+        return token;
+       
+    }
+    else
+    {
+        return "Unauthorized";
+    }
+}).WithTags("Authorization").WithMetadata(new SwaggerOperationAttribute("To Authenticate the Query Service API."));
+
+//create Query for Method 1
+app.MapPost("/CreateQuery",
+    [Authorize(AuthenticationSchemes = JwtBearerDefaults.AuthenticationScheme)]
+async (
+        [SwaggerParameter("To take ProtocolID.", Required = true)] int protocolID,
+        [SwaggerParameter("To select type of Environment from below Available Values.", Required = true)][FromQuery] EnvironmentMode environment,
+        [SwaggerParameter("To select type of Module from below Available Values.", Required = true)][FromQuery] DSG.Enumerations.Module module,
+        [SwaggerParameter("Initially to take QueryID as 0.", Required = false)] int queryID,
+        [SwaggerParameter("To take ModuleID.", Required = true)]int moduleID,
+        [SwaggerParameter("To take SiteNumber.", Required = true)] string siteNumber,
+        [SwaggerParameter("To take display as Patient Dispaly or PatientID.", Required = true)] string display,
+        [SwaggerParameter("If you pass both PatientId and SiteNumber take subType as 0 Otherwise if you pass only Patient Display take subType as 1.", Required = true)] int subType,
+        [SwaggerParameter("To take PageNumber.", Required = true)] string pageNumber,
+        [SwaggerParameter("Initially to take PageSequence as 0", Required = false)] int sequence,
+        [SwaggerParameter("To take VisitNumber.", Required = true)] string visitNumber,
+        [SwaggerParameter("Initially to take VisitSequence as 0.", Required = false)] int visitSequence,
+        [SwaggerParameter("To take FieldName.", Required = true)] string fieldName,
+        [SwaggerParameter("Initially to take ValidateID as 0.", Required = false)] int validateID,
+        [SwaggerParameter("Initially to take MessageID as 0.", Required = false)] int messageID,
+        [SwaggerParameter("To take UserID.", Required = true)] int userID,
+        [SwaggerParameter("To select type of QueryAccessAction from below Available Values.", Required = true)][FromQuery] QueryAccessAction queryAccessAction,
+        [SwaggerParameter("To select type of QueryPriority from below Available Values.", Required = true)][FromQuery] QueryPriority queryPriority,
+        [SwaggerParameter("To take EventText as a Query description.", Required = true)] string eventText,
+        [SwaggerParameter("To take EventUserToRespond.", Required = true)] int eventUserToRespond,
+        [SwaggerParameter("To select type of EclLevel from below Available Values.", Required = true)][FromQuery] EclLevel eclLevel,
+        [SwaggerParameter("To take Mails as your Gmail ID.", Required = false)] string mails) =>
+    {
+        try
+        {
+            connectStr = bLLProbuild.GetProbuildProtoclsData(protocolID);
+            QueryMethods objQueryMethods = new QueryMethods(connectStr);
+            List<QueryActionResultInfo> result = new List<QueryActionResultInfo>();
+            List<QueryInfo> queryList = new List<QueryInfo>();
+            BLLCommon bLLCommon = new BLLCommon(_appConnectionString);
+            
+            //Method 1
+            int UsubjID = 0;
+            if (subType == 0)
+            {
+                UsubjID =bLLCommon.GetSubsData(display, siteNumber);
+            }
+            else
+            {
+                UsubjID = bLLCommon.GetSubData(display);
+            }
+            QueryInfo query = new QueryInfo()
+            {
+                QueryID = queryID,
+                ModuleID = moduleID,
+                SiteID = bLLCommon.GetSiteData(siteNumber),
+                UsubjID= UsubjID,
+                PageID = bLLCommon.GetPagesData(pageNumber,moduleID),
+                Sequence = sequence,
+                VisitID = bLLCommon.GetVisitData(visitNumber,moduleID),
+                VisitSequence = visitSequence,
+                FieldID =bLLCommon.GetFieldsData(fieldName),
+                ValidateID = validateID,
+                MessageID = messageID,
+                UserID = userID,
+                EventType = (int)queryAccessAction,
+                EventPriority = (int)queryPriority,
+                EventText = eventText,
+                EventUserToRespond = eventUserToRespond,
+                QueryLevel = (int)eclLevel,
+                Mails = mails,
+            };
+
+            queryList.Add(query);
+            QueryListInfo queryInfo = new QueryListInfo()
+            {
+                ProtocolID = protocolID,
+                Environment = environment.ToString(),
+                Module = module.ToString(),
+                Queries = queryList,
+            };
+
+            result = objQueryMethods.CreateQuery(queryInfo);
+            string json=JsonConvert.SerializeObject(result);
+            LogData.LogsData(json);
+            return result;
+        }
+        catch (Exception ex)
+        {
+            throw ex;
+        }
+}).WithTags("CreateQuery").WithMetadata(new SwaggerOperationAttribute("Creating a Single Query by passing parameters with certain conditions","Need To Take required parameters to execute this Method."));
+
+//Create Query Batch Method for Multiple Queries.
+
+app.MapPost("/CreateQueryBatch",
+    [Authorize(AuthenticationSchemes = JwtBearerDefaults.AuthenticationScheme)] async (
+    [SwaggerParameter("To pass List type of Json Data.",Required = true)] string queryJson,
+    [SwaggerParameter("To take ProtocolID.",Required = true)] int protocolID) =>
+{
+    try
+    {
+        connectStr = bLLProbuild.GetProbuildProtoclsData(protocolID);
+        QueryMethods objQueryMethods = new QueryMethods(connectStr);
+        QueryBatchResponseInfo result = new QueryBatchResponseInfo();
+        List<BatchRquestInfo> queryList = new List<BatchRquestInfo>();
+
+        dynamic data = JsonConvert.DeserializeObject(queryJson, typeof(object));
+        foreach (var item in data)
+        {
+            BatchRquestInfo batchRquestInfo = new BatchRquestInfo()
+            {
+                SiteID = item.siteID,
+                UsubjID = item.usubjID,
+                VisitID = item.visitID,
+                VisitSequence = item.visitSequence,
+                PageID = item.pageID,
+                Sequence = item.sequence,
+                PageReleaseID = item.pageReleaseID,
+                RowNo = item.rowNo,
+                FieldID = item.fieldID,
+                QueryID = item.queryID,
+                ExcludeID = item.excludeID,
+                EventType = item.eventType,
+                EventPriority = item.eventPriority,
+                Action = item.action,
+                QueryText = item.queryText
+            };
+            queryList.Add(batchRquestInfo);
+            QueryBatchRequestInfo querydata = new QueryBatchRequestInfo()
+            {
+                CustomerID = item.customerID,
+                SponsorID = item.sponsorID,
+                ProtocolID = item.protocolID,
+                Environment = item.environment,
+                ModuleID = item.moduleID,
+                UserID = item.userID,
+                ScreenName = item.screenName,
+                ClientTZO = item.clientTZO,
+                ThreadText = item.threadText,
+                QueryData = queryList
+            };
+            result = objQueryMethods.CreateQueryBatch(querydata);
+            string json = JsonConvert.SerializeObject(result);
+            LogData.LogsData(json);
+        };
+        return result;
+    }
+    catch (Exception ex)
+    {
+        throw ex;
+    }
+}).WithTags("CreateQueryBatch").WithMetadata(new SwaggerOperationAttribute("Creating a Multiple Queries by passing List type of Json data", "Need To Take required parameters to execute this Method"));
+
+//Get All the Data of Create Queries from database
+app.MapGet("AllQueryData",
+    [Authorize(AuthenticationSchemes = JwtBearerDefaults.AuthenticationScheme)]async
+    ([SwaggerParameter("To take ProtocolID.", Required = true)] int protocolID) =>
+{
+    connectStr = bLLProbuild.GetProbuildProtoclsData(protocolID);
+    BLLCommon bLLCommon = new BLLCommon(connectStr);
+    List<QueryListData> queryList = new List<QueryListData>();
+    DataTable dt;
+    try
+    {
+        dt = bLLCommon.GetQueriesData();       
+        queryList = (from DataRow d in dt.Rows
+                 select new QueryListData
+                 {
+                     QueryID = Convert.ToInt32(d["ECL_ACTION_ID"]),
+                     ModuleID = Convert.ToInt32(d["MODULE_ID"]),
+                     SiteID = Convert.ToInt32(d["TARGET_LEVEL_ID"]),
+                     UsubjID = d["USUBJID"].ToString(),
+                     PageID = Convert.ToInt32(d["ECL_PAGE_ID"]),
+                     Sequence = Convert.ToInt32(d["SEQUENCE_NUMBER"]),
+                     VisitID = d["VISIT_ID"].ToString(),
+                     VisitSequence = d["VISIT_SEQUENCE"].ToString(),
+                     FieldID = Convert.ToInt32(d["ECL_LEVEL_ID"]),
+                     ValidateID = 0,
+                     MessageID = 0,
+                     UserID = Convert.ToInt32(d["USER_ID"]),
+                     EventType = Convert.ToInt32(d["EVENT_TYPE"]),
+                     EventPriority = Convert.ToInt32(d["EVENT_PRIORITY"]),
+                     EventText = d["EVENT_TEXT"].ToString(),
+                     EventUserToRespond = Convert.ToInt32(d["EVENT_USER_TO_RESPOND"]),
+                     QueryLevel = Convert.ToInt32(d["ECL_LEVEL"]),
+                     Mails = ""
+                 }).ToList();
+        string json = JsonConvert.SerializeObject(queryList);
+        LogData.LogsData(json);
+        return queryList;
+    }
+    catch (Exception ex)
+    {
+        throw ex;
+    }
+}).WithTags("AllQueryData").WithMetadata(new SwaggerOperationAttribute("To get all Query data by passing perticular ProtocolID","Please wait for Response to get all Query data."));
+
+//Get CreateQuery data by queryID 
+app.MapGet("/DatabyQueriesID",
+    [Authorize(AuthenticationSchemes = JwtBearerDefaults.AuthenticationScheme)]async
+    ([SwaggerParameter("To take  QueryId",Required =true)]int queryID,
+    [SwaggerParameter("To take ProtocolID.", Required = true)] int protocolID) =>
+{
+    connectStr = bLLProbuild.GetProbuildProtoclsData(protocolID);
+    BLLCommon bLLCommon = new BLLCommon(connectStr);
+    List<QueryListData> queryList = new List<QueryListData>();
+    DataTable dt;
+    try
+    {
+        dt = bLLCommon.GetQueriesbyID(queryID);
+        queryList = (from DataRow d in dt.Rows
+                     select new QueryListData
+                     {
+                         QueryID = Convert.ToInt32(d["ECL_ACTION_ID"]),
+                         ModuleID = Convert.ToInt32(d["MODULE_ID"]),
+                         SiteID = Convert.ToInt32(d["TARGET_LEVEL_ID"]),
+                         UsubjID = d["USUBJID"].ToString(),
+                         PageID = Convert.ToInt32(d["ECL_PAGE_ID"]),
+                         Sequence = Convert.ToInt32(d["SEQUENCE_NUMBER"]),
+                         VisitID = d["VISIT_ID"].ToString(),
+                         VisitSequence = d["VISIT_SEQUENCE"].ToString(),
+                         FieldID = Convert.ToInt32(d["ECL_LEVEL_ID"]),
+                         ValidateID = 0,
+                         MessageID = 0,
+                         UserID = Convert.ToInt32(d["USER_ID"]),
+                         EventType = Convert.ToInt32(d["EVENT_TYPE"]),
+                         EventPriority = Convert.ToInt32(d["EVENT_PRIORITY"]),
+                         EventText = d["EVENT_TEXT"].ToString(),
+                         EventUserToRespond = Convert.ToInt32(d["EVENT_USER_TO_RESPOND"]),
+                         QueryLevel = Convert.ToInt32(d["ECL_LEVEL"]),
+                         Mails = ""
+                     }).ToList();
+        string json = JsonConvert.SerializeObject(queryList);
+        LogData.LogsData(json);
+        return queryList;
+    }
+    catch (Exception ex)
+    {
+        throw ex;
+    }
+}).WithTags("AllQueryData").WithMetadata(new SwaggerOperationAttribute("To get all Query data by passing required parameters as QueryID and ProtocolID", "Please wait for Response to get all Query data."));
+
+//Get CreateQuery data by pageID from database
+app.MapGet("DatabyPageID", 
+    [Authorize(AuthenticationSchemes = JwtBearerDefaults.AuthenticationScheme)] async 
+    ([SwaggerParameter("To take  PageID", Required = true)] int pageID,
+    [SwaggerParameter("To take  ProtocolID", Required = true)] int protocolID) =>
+{
+    connectStr = bLLProbuild.GetProbuildProtoclsData(protocolID);
+    BLLCommon bLLCommon = new BLLCommon(connectStr);
+    List<QueryListData> queryList = new List<QueryListData>();
+    DataTable dt;
+    try
+    {
+        dt = bLLCommon.GetPageByID(pageID);
+        queryList = (from DataRow d in dt.Rows
+                     select new QueryListData
+                     {
+                         QueryID = Convert.ToInt32(d["ECL_ACTION_ID"]),
+                         ModuleID = Convert.ToInt32(d["MODULE_ID"]),
+                         SiteID = Convert.ToInt32(d["TARGET_LEVEL_ID"]),
+                         UsubjID = d["USUBJID"].ToString(),
+                         PageID = Convert.ToInt32(d["ECL_PAGE_ID"]),
+                         Sequence = Convert.ToInt32(d["SEQUENCE_NUMBER"]),
+                         VisitID = d["VISIT_ID"].ToString(),
+                         VisitSequence = d["VISIT_SEQUENCE"].ToString(),
+                         FieldID = Convert.ToInt32(d["ECL_LEVEL_ID"]),
+                         ValidateID = 0,
+                         MessageID = 0,
+                         UserID = Convert.ToInt32(d["USER_ID"]),
+                         EventType = Convert.ToInt32(d["EVENT_TYPE"]),
+                         EventPriority = Convert.ToInt32(d["EVENT_PRIORITY"]),
+                         EventText = d["EVENT_TEXT"].ToString(),
+                         EventUserToRespond = Convert.ToInt32(d["EVENT_USER_TO_RESPOND"]),
+                         QueryLevel = Convert.ToInt32(d["ECL_LEVEL"]),
+                         Mails = ""
+                     }).ToList();
+        string json = JsonConvert.SerializeObject(queryList);
+        LogData.LogsData(json);
+        return queryList;
+    }
+    catch (Exception ex)
+    {
+        throw ex;
+    }
+}).WithTags("AllQueryData").WithMetadata(new SwaggerOperationAttribute("To get all Query data by passing required parameters as PageID and ProtocolID", "Please wait for Response to get all Query data."));
+
+//Get the Limit Range of  Create Query data base on start number and Limit from database
+app.MapGet("DatabyLimitQueryData",
+    [Authorize(AuthenticationSchemes = JwtBearerDefaults.AuthenticationScheme)] async 
+    ([SwaggerParameter("To take  Query initial Value.", Required = true)] int start,
+    [SwaggerParameter("To take  Query Limit Value.", Required = true)] int limit,
+    [SwaggerParameter("To take  ProtocolID", Required = true)] int protocolID) =>
+{
+    connectStr = bLLProbuild.GetProbuildProtoclsData(protocolID);
+    BLLCommon bLLCommon = new BLLCommon(connectStr);
+    List<QueryListData> queryList = new List<QueryListData>();
+    DataTable dt;
+    try
+    {
+        dt = bLLCommon.GetStartLimitData(start,limit);
+        queryList = (from DataRow d in dt.Rows
+                     select new QueryListData
+                     {
+                         QueryID = Convert.ToInt32(d["ECL_ACTION_ID"]),
+                         ModuleID = Convert.ToInt32(d["MODULE_ID"]),
+                         SiteID = Convert.ToInt32(d["TARGET_LEVEL_ID"]),
+                         UsubjID = d["USUBJID"].ToString(),
+                         PageID = Convert.ToInt32(d["ECL_PAGE_ID"]),
+                         Sequence = Convert.ToInt32(d["SEQUENCE_NUMBER"]),
+                         VisitID = d["VISIT_ID"].ToString(),
+                         VisitSequence = d["VISIT_SEQUENCE"].ToString(),
+                         FieldID = Convert.ToInt32(d["ECL_LEVEL_ID"]),
+                         ValidateID = 0,
+                         MessageID = 0,
+                         UserID = Convert.ToInt32(d["USER_ID"]),
+                         EventType = Convert.ToInt32(d["EVENT_TYPE"]),
+                         EventPriority = Convert.ToInt32(d["EVENT_PRIORITY"]),
+                         EventText = d["EVENT_TEXT"].ToString(),
+                         EventUserToRespond = Convert.ToInt32(d["EVENT_USER_TO_RESPOND"]),
+                         QueryLevel = Convert.ToInt32(d["ECL_LEVEL"]),
+                         Mails = ""
+                     }).ToList();
+        string json = JsonConvert.SerializeObject(queryList);
+        LogData.LogsData(json);
+        return queryList;
+    }
+    catch (Exception ex)
+    {
+        throw ex;
+    }
+}).WithTags("AllQueryData").WithMetadata(new SwaggerOperationAttribute("To get all Query data by passing required parameters as start,limit and ProtocolID.", "Please wait for Response to get all Query data."));
+
+
+//QueryClose Request Method
+//Method 1 (Passing all the JSON Data)
+app.MapPost("/QueryclosedJson",
+     [Authorize(AuthenticationSchemes = JwtBearerDefaults.AuthenticationScheme)] async (
+     [SwaggerParameter("To pass List type of Json data.", Required = true)] string querycloseJson,
+     [SwaggerParameter("To take  ProtocolID", Required = true)] int protocolID) =>
+{
+    try
+    {
+        connectStr = bLLProbuild.GetProbuildProtoclsData(protocolID);
+        QueryMethods objQueryMethods = new QueryMethods(connectStr);
+        List<QueryActionResultInfo> result = new List<QueryActionResultInfo>();
+        result= objQueryMethods.QueryClose(querycloseJson);
+        string json = JsonConvert.SerializeObject(result);
+        LogData.LogsData(json);
+        return result;
+    }
+    catch(Exception ex)
+    {
+        throw ex;
+    }
+}).WithTags("QueryClose").WithMetadata(new SwaggerOperationAttribute("Closing a Queries by passing List type of Json data", "Need To Take required parameters to execute this Method"));
+//Method 2 (Passing Required Json data) in the Swagger UI
+app.MapPost("/QueryClosed",
+    [Authorize(AuthenticationSchemes = JwtBearerDefaults.AuthenticationScheme)] async (
+    [SwaggerParameter("To take  ProtocolID.", Required = true)] int protocolID,
+    [SwaggerParameter("To select type of Environment from below Available Values.", Required = true)][FromQuery] EnvironmentMode environment,
+    [SwaggerParameter("To select type of Module from below Available Values.", Required = true)][FromQuery] DSG.Enumerations.Module module,
+    [SwaggerParameter("To take QueryID.", Required = true)] int queryID,
+    [SwaggerParameter("To take UserID.", Required = true)] int userID,
+    [SwaggerParameter("To take EventText as a Query description.", Required = true)] string eventText) =>
+{
+    try
+    {
+        connectStr = bLLProbuild.GetProbuildProtoclsData(protocolID);
+        QueryMethods objQueryMethods = new QueryMethods(connectStr);
+        List<QueryActionResultInfo> result = new List<QueryActionResultInfo>();
+        List<QueryInfo> queryList = new List<QueryInfo>();
+        QueryInfo query = new QueryInfo()
+        {
+            QueryID =queryID,
+            UserID = userID,
+            EventText =eventText
+        };
+        queryList.Add(query);
+        QueryListInfo queryInfo = new QueryListInfo()
+        {
+            ProtocolID =protocolID,
+            Environment =environment.ToString(),
+            Module =module.ToString(),
+            Queries =queryList,
+        };
+        result = objQueryMethods.QueryClose(queryInfo);
+        string json = JsonConvert.SerializeObject(result);
+        LogData.LogsData(json);
+        return result;
+    }
+    catch(Exception ex)
+    {
+        throw ex;
+    }
+}).WithTags("QueryClose").WithMetadata(new SwaggerOperationAttribute("Closing a Queries by passing parameters", "Need To Take required parameters to execute this Method"));
+
+//QueryReviewed Request Method
+//Method 1 (Passing all the JSON Data)
+app.MapPost("/QueryReviewJson",
+    [Authorize(AuthenticationSchemes = JwtBearerDefaults.AuthenticationScheme)] async (
+    [SwaggerParameter("To pass List type of Json Data.", Required = true)] string queryReviewJson,
+    [SwaggerParameter("To take  ProtocolID.", Required = true)] int protocolID) =>
+{
+    try
+    {
+        connectStr = bLLProbuild.GetProbuildProtoclsData(protocolID);
+        QueryMethods objQueryMethods = new QueryMethods(connectStr);
+        List<QueryActionResultInfo> result = new List<QueryActionResultInfo>();
+        result = objQueryMethods.QueryReviewed(queryReviewJson);
+        string json = JsonConvert.SerializeObject(result);
+        LogData.LogsData(json);
+        return result;
+    }
+    catch (Exception ex)
+    {
+        throw ex;
+    }
+}).WithTags("QueryReviewed").WithMetadata(new SwaggerOperationAttribute("QueryReviewed by passing List type of Json data", "Need To Take required parameters to execute this Method"));
+
+//Method 2 (Passing Required Json data) in the Swagger UI
+app.MapPost("/QueryReviewed",
+    [Authorize(AuthenticationSchemes = JwtBearerDefaults.AuthenticationScheme)] async (
+    [SwaggerParameter("To take  ProtocolID.", Required = true)] int protocolID,
+    [SwaggerParameter("To select type of Environment from below Available Values.", Required = true)][FromQuery] EnvironmentMode environment,
+    [SwaggerParameter("To select type of Module from below Available Values.", Required = true)][FromQuery] DSG.Enumerations.Module module,
+    [SwaggerParameter("To take QueryID.", Required = true)] int queryID,
+    [SwaggerParameter("To take UserID.", Required = true)] int userID) =>
+{
+    try
+    {
+        connectStr = bLLProbuild.GetProbuildProtoclsData(protocolID);
+        QueryMethods objQueryMethods = new QueryMethods(connectStr);
+        List<QueryActionResultInfo> result = new List<QueryActionResultInfo>();
+        List<QueryInfo> queryList = new List<QueryInfo>();
+        QueryInfo query = new QueryInfo()
+        {
+            QueryID = queryID,
+            UserID = userID,
+        };
+        queryList.Add(query);
+        QueryListInfo queryInfo = new QueryListInfo()
+        {
+            ProtocolID = protocolID,
+            Environment = environment.ToString(),
+            Module = module.ToString(),
+            Queries = queryList,
+        };
+        result = objQueryMethods.QueryReviewed(queryInfo);
+        string json = JsonConvert.SerializeObject(result);
+        LogData.LogsData(json);
+        return result;
+    }
+    catch (Exception ex)
+    {
+        throw ex;
+    }
+}).WithTags("QueryReviewed").WithMetadata(new SwaggerOperationAttribute("QueryReviewed by passing parameters", "Need To Take required parameters to execute this Method"));
+
+
+
+//QueryReviewedDeleted Request Method
+//Method 1 (Passing all the JSON Data)
+app.MapPost("/QueryReviewedDeletedJson",
+     [Authorize(AuthenticationSchemes = JwtBearerDefaults.AuthenticationScheme)] async (
+     [SwaggerParameter("To pass List type of Json Data.", Required = true)] string queryReviewedDeletedJson,
+     [SwaggerParameter("To take  ProtocolID.", Required = true)] int protocolID) =>
+{
+    try
+    {
+        connectStr = bLLProbuild.GetProbuildProtoclsData(protocolID);
+        QueryMethods objQueryMethods = new QueryMethods(connectStr);
+        List<QueryActionResultInfo> result = new List<QueryActionResultInfo>();
+        result = objQueryMethods.QueryReviewedDeleted(queryReviewedDeletedJson);
+        string json = JsonConvert.SerializeObject(result);
+        LogData.LogsData(json);
+        return result;
+    }
+    catch (Exception ex)
+    {
+        throw ex;
+    }
+}).WithTags("QueryReviewedDeleted").WithMetadata(new SwaggerOperationAttribute("QueryReviewedDeleted by passing List type of Json data", "Need To Take required parameters to execute this Method"));
+
+
+//Method 2 (Passing Required Json data) in the Swagger UI
+app.MapPost("/QueryReviewedDeleted",
+    [Authorize(AuthenticationSchemes = JwtBearerDefaults.AuthenticationScheme)] async (
+    [SwaggerParameter("To take  ProtocolID.", Required = true)] int protocolID,
+    [SwaggerParameter("To select type of Environment from below Available Values.", Required = true)][FromQuery] EnvironmentMode environment,
+    [SwaggerParameter("To select type of Module from below Available Values.", Required = true)][FromQuery] DSG.Enumerations.Module module,
+    [SwaggerParameter("To take QueryID.", Required = true)] int queryID,
+    [SwaggerParameter("To take UserID.", Required = true)] int userID) =>
+{
+    try
+    {
+        connectStr = bLLProbuild.GetProbuildProtoclsData(protocolID);
+        QueryMethods objQueryMethods = new QueryMethods(connectStr);
+        List<QueryActionResultInfo> result = new List<QueryActionResultInfo>();
+        List<QueryInfo> queryList = new List<QueryInfo>();
+        QueryInfo query = new QueryInfo()
+        {
+            QueryID = queryID,
+            UserID = userID,
+        };
+        queryList.Add(query);
+        QueryListInfo queryInfo = new QueryListInfo()
+        {
+            ProtocolID = protocolID,
+            Environment = environment.ToString(),
+            Module = module.ToString(),
+            Queries = queryList,
+        };
+        result = objQueryMethods.QueryReviewedDeleted(queryInfo);
+        string json = JsonConvert.SerializeObject(result);
+        LogData.LogsData(json);
+        return result;
+    }
+    catch (Exception ex)
+    {
+        throw ex;
+    }
+}).WithTags("QueryReviewedDeleted").WithMetadata(new SwaggerOperationAttribute("QueryReviewedDeleted by passing parameters", "Need To Take required parameters to execute this Method"));
+
+//QueryReopen Request Method
+//Method 1 (Passing all the JSON Data)
+app.MapPost("/QueryReopenedJson",
+    [Authorize(AuthenticationSchemes = JwtBearerDefaults.AuthenticationScheme)] async (
+    [SwaggerParameter("To pass List type of Json Data.", Required = true)] string queryReopenedJson,
+    [SwaggerParameter("To take  ProtocolID.", Required = true)] int protocolID) =>
+{
+    try
+    {
+        connectStr = bLLProbuild.GetProbuildProtoclsData(protocolID);
+        QueryMethods objQueryMethods = new QueryMethods(connectStr);
+        List<QueryActionResultInfo> result = new List<QueryActionResultInfo>();
+        result = objQueryMethods.QueryReOpen(queryReopenedJson);
+        string json = JsonConvert.SerializeObject(result);
+        LogData.LogsData(json);
+        return result;
+    }
+    catch (Exception ex)
+    {
+        throw ex;
+    }
+}).WithTags("QueryReopen").WithMetadata(new SwaggerOperationAttribute("QueryReopen by passing List type of Json data", "Need To Take required parameters to execute this Method"));
+//Method 2 (Passing Required Json data) in the Swagger UI
+app.MapPost("/QueryReopend",
+    [Authorize(AuthenticationSchemes = JwtBearerDefaults.AuthenticationScheme)] async ([SwaggerParameter("To take  ProtocolID.", Required = true)] int protocolID,
+    [SwaggerParameter("To select type of Environment from below Available Values.", Required = true)][FromQuery] EnvironmentMode environment,
+    [SwaggerParameter("To select type of Module from below Available Values.", Required = true)][FromQuery] DSG.Enumerations.Module module,
+    [SwaggerParameter("To take QueryID.", Required = true)] int queryID,
+    [SwaggerParameter("To take UserID.", Required = true)] int userID,
+    [SwaggerParameter("To take EventText as a Query description.", Required = true)] string eventText,
+    [SwaggerParameter("To take EventUserToRespond.", Required = true)] int eventUserToRespond) =>
+{
+    try
+    {
+        connectStr = bLLProbuild.GetProbuildProtoclsData(protocolID);
+        QueryMethods objQueryMethods = new QueryMethods(connectStr);
+        List<QueryActionResultInfo> result = new List<QueryActionResultInfo>();
+        List<QueryInfo> queryList = new List<QueryInfo>();
+        QueryInfo query = new QueryInfo()
+        {
+            QueryID = queryID,
+            UserID = userID,
+            EventText = eventText,
+            EventUserToRespond = eventUserToRespond,
+        };
+        queryList.Add(query);
+        QueryListInfo queryInfo = new QueryListInfo()
+        {
+            ProtocolID = protocolID,
+            Environment = environment.ToString(),
+            Module = module.ToString(),
+            Queries = queryList,
+        };
+        result = objQueryMethods.QueryReOpen(queryInfo);
+        string json = JsonConvert.SerializeObject(result);
+        LogData.LogsData(json);
+        return result;
+    }
+    catch (Exception ex)
+    {
+        throw ex;
+    }
+}).WithTags("QueryReopen").WithMetadata(new SwaggerOperationAttribute("QueryReopen by passing parameters ", "Need To Take required parameters to execute this Method"));
+
+
+//QueryResponse Request Method
+//Method 1 (Passing all the JSON Data)
+app.MapPost("/QueryResponseJson",
+     [Authorize(AuthenticationSchemes = JwtBearerDefaults.AuthenticationScheme)] async (
+     [SwaggerParameter("To pass List type of Json Data..", Required = true)] string queryResponseJson,
+     [SwaggerParameter("To take  ProtocolID.", Required = true)] int protocolID) =>
+{
+    try
+    {
+        connectStr = bLLProbuild.GetProbuildProtoclsData(protocolID);
+        QueryMethods objQueryMethods = new QueryMethods(connectStr);
+        List<QueryActionResultInfo> result = new List<QueryActionResultInfo>();
+        result = objQueryMethods.QueryResponse(queryResponseJson);
+        string json = JsonConvert.SerializeObject(result);
+        LogData.LogsData(json);
+        return result;
+    }
+    catch (Exception ex)
+    {
+        throw ex;
+    }
+}).WithTags("QueryResponse").WithMetadata(new SwaggerOperationAttribute("QueryResponse by passing List type of Json data ", "Need To Take required parameters to execute this Method"));
+//Method 2 (Passing Required Json data) in the Swagger UI
+app.MapPost("/QueryResponsed",
+    [Authorize(AuthenticationSchemes = JwtBearerDefaults.AuthenticationScheme)] async (
+    [SwaggerParameter("To take  ProtocolID.", Required = true)] int protocolID,
+    [SwaggerParameter("To select type of Environment from below Available Values.", Required = true)][FromQuery] EnvironmentMode environment,
+    [SwaggerParameter("To select type of Module from below Available Values.", Required = true)][FromQuery] DSG.Enumerations.Module module,
+    [SwaggerParameter("To take QueryID.", Required = true)] int queryID,
+    [SwaggerParameter("To take UserID.", Required = true)] int userID,
+    [SwaggerParameter("To take EventText as a Query description.", Required = true)] string eventText,
+    [SwaggerParameter("To take EventUserToRespond.", Required = true)] int eventUserToRespond) =>
+{
+    try
+    {
+        connectStr = bLLProbuild.GetProbuildProtoclsData(protocolID);
+        QueryMethods objQueryMethods = new QueryMethods(connectStr);
+        List<QueryActionResultInfo> result = new List<QueryActionResultInfo>();
+        List<QueryInfo> queryList = new List<QueryInfo>();
+        QueryInfo query = new QueryInfo()
+        {
+            QueryID = queryID,
+            UserID = userID,
+            EventText = eventText,
+            EventUserToRespond =eventUserToRespond,
+        };
+        queryList.Add(query);
+        QueryListInfo queryInfo = new QueryListInfo()
+        {
+            ProtocolID = protocolID,
+            Environment = environment.ToString(),
+            Module = module.ToString(),
+            Queries = queryList,
+        };
+        result = objQueryMethods.QueryResponse(queryInfo);
+        string json = JsonConvert.SerializeObject(result);
+        LogData.LogsData(json);
+        return result;
+    }
+    catch (Exception ex)
+    {
+        throw ex;
+    }
+}).WithTags("QueryResponse").WithMetadata(new SwaggerOperationAttribute("QueryResponse by passing parameters ", "Need To Take required parameters to execute this Method"));
+
+//QueryStatus Method
+app.MapPost("/QuerystatusJson",
+    [Authorize(AuthenticationSchemes = JwtBearerDefaults.AuthenticationScheme)] async (
+    [SwaggerParameter("To pass List type of Json Data..", Required = true)] string queryStatus,
+    [SwaggerParameter("To take  ProtocolID.", Required = true)] int protocolID) =>
+{
+    try
+    {
+        connectStr = bLLProbuild.GetProbuildProtoclsData(protocolID);
+        QueryMethods objQueryMethods = new QueryMethods(connectStr);
+        QueryBatchResponseInfo result = new QueryBatchResponseInfo();
+        result= objQueryMethods.QueryStatus(queryStatus);
+        string json = JsonConvert.SerializeObject(result);
+        LogData.LogsData(json);
+        return result;      
+    }
+    catch(Exception ex)
+    {
+        throw ex;
+    }
+}).WithTags("QueryStatus").WithMetadata(new SwaggerOperationAttribute("QueryStatus by passing List type of Json data ", "Need To Take required parameters to execute this Method"));
+
+//ListofQueries Method
+
+app.MapPost("/listofQueries",
+    [Authorize(AuthenticationSchemes = JwtBearerDefaults.AuthenticationScheme)] async (
+    [SwaggerParameter("To pass List type of Json Data..", Required = true)] string listQueryJson,
+    [SwaggerParameter("To take  ProtocolID.", Required = true)] int protocolID) =>
+{
+    try
+    {
+        connectStr = bLLProbuild.GetProbuildProtoclsData(protocolID);
+        QueryMethods objQueryMethods = new QueryMethods(connectStr);
+        List<QueryListItem> result=new List<QueryListItem>();
+        result = objQueryMethods.ListOfQueries(listQueryJson);
+        string json = JsonConvert.SerializeObject(result);
+        LogData.LogsData(json);
+        return result;
+    }
+    catch(Exception ex)
+    {
+        throw ex;
+    }
+}).WithTags("ListofQueries").WithMetadata(new SwaggerOperationAttribute("ListofQueries by passing List type of Json data ", "Need To Take required parameters to execute this Method"));
+
+app.UseHttpsRedirection();
+app.Run();
+
